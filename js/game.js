@@ -969,8 +969,8 @@ async function boot() {
   setLoadProgress(45, 'Loading 3D Soldier Model (assets/models/soldier.glb)...');
   LOADED_ASSETS.soldier = await loadOptionalGLB('./assets/models/soldier.glb');
 
-  setLoadProgress(65, 'Loading 3D Weapon Model (assets/models/weapon.glb)...');
-  LOADED_ASSETS.weapon = await loadOptionalGLB('./assets/models/weapon.glb');
+  setLoadProgress(65, 'Loading 3D Weapon Model (assets/models/wepon.glb)...');
+  LOADED_ASSETS.weapon = await loadOptionalGLB('./assets/models/wepon.glb');
 
   setLoadProgress(80, 'Loading Military Props (watchtower.glb / truck.glb)...');
   LOADED_ASSETS.watchtower = await loadOptionalGLB('./assets/models/watchtower.glb');
