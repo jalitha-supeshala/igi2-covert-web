@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>IGI 2: Covert Strike — WebGL Edition</title>
+  <link rel="stylesheet" href="./css/style.css" />
+  <!-- Modern Three.js ES Modules (Supports GLTFLoader + SkeletonUtils for Real Animated Models) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <div id="vignette"></div>
+  <div id="damage-flash"></div>
+  <div id="thermal-overlay"></div>
+  <div id="scope-overlay"></div>
+
+  <!-- IGI 2 REALISTIC LOADING SCREEN -->
+  <div id="loading-screen" class="overlay-screen">
+    <div class="panel">
+      <div class="title-igi">IGI 2: COVERT STRIKE</div>
+      <div class="sub-info"><b>MISSION 01: INFILTRATION</b> — CARPATHIAN MOUNTAINS, RUSSIA</div>
+      <div class="load-bar-wrap"><div id="load-bar"></div></div>
+      <div id="load-log" class="load-log">Initializing WebGL Engine...</div>
+    </div>
+  </div>
+
+  <!-- MISSION BRIEFING / START MENU -->
+  <div id="start-screen" class="overlay-screen" style="display:none;">
+    <div class="panel">
+      <div class="title-igi">MISSION 01: INFILTRATION</div>
+      <div class="sub-info">
+        <b>BRIEFING (ANYA):</b> Jones, infiltrate the snowy mountain base below. Retrieve the <b>EMP Chips</b> inside the Warehouse, hack the <b>Bunker Terminal</b>, and extract at the <b>Mine Elevator</b>.<br><br>
+        <span style="color:#7CFF9B;">PC:</span> Click Screen, WASD, Mouse, L-Click Fire, R-Click Scope, T Thermal, C Crouch, R Reload, E Interact, M Map
+      </div>
+      <div id="asset-badge" class="asset-badge"></div>
+      <div id="save-status-home" class="save-note"></div>
+      <div class="btn-row">
+        <button class="igi-btn primary" id="btn-continue" style="display:none;">CONTINUE SAVED</button>
+        <button class="igi-btn primary" id="btn-deploy">DEPLOY MISSION</button>
+        <button class="igi-btn" id="btn-open-settings">GRAPHICS &amp; OPT</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GRAPHICS & LOW-END OPTIMIZATION MENU -->
+  <div id="settings-modal" class="overlay-screen" style="display:none;">
+    <div class="panel">
+      <div class="title-igi">GRAPHICS &amp; OPTIMIZATION</div>
+
+      <div class="setting-row">
+        <span><b>Device Preset</b></span>
+        <div class="preset-group">
+          <button class="preset-btn" data-preset="potato">ULTRA LOW</button>
+          <button class="preset-btn" data-preset="low">LOW</button>
+          <button class="preset-btn" data-preset="med">MED</button>
+          <button class="preset-btn" data-preset="high">HIGH</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <span>Resolution Scale</span>
+        <div class="preset-group">
+          <button class="preset-btn res-btn" data-res="0.5">50%</button>
+          <button class="preset-btn res-btn" data-res="0.75">75%</button>
+          <button class="preset-btn res-btn" data-res="1.0">100%</button>
+          <button class="preset-btn res-btn" data-res="1.25">125%</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <span>Shadow Quality</span>
+        <div class="preset-group">
+          <button class="preset-btn shd-btn" data-shd="0">OFF</button>
+          <button class="preset-btn shd-btn" data-shd="512">LOW</button>
+          <button class="preset-btn shd-btn" data-shd="1024">MED</button>
+          <button class="preset-btn shd-btn" data-shd="2048">HIGH</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <span>Snowfall &amp; Atmosphere</span>
+        <button class="preset-btn" id="tog-snow">ON</button>
+      </div>
+
+      <div class="setting-row">
+        <span>Draw Distance (LOD)</span>
+        <div class="preset-group">
+          <button class="preset-btn dist-btn" data-dist="65">NEAR</button>
+          <button class="preset-btn dist-btn" data-dist="120">MED</button>
+          <button class="preset-btn dist-btn" data-dist="190">FAR</button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <span>Aim Sensitivity</span>
+        <div class="preset-group">
+          <button class="preset-btn sens-btn" data-sens="0.6">0.6x</button>
+          <button class="preset-btn sens-btn" data-sens="1.0">1.0x</button>
+          <button class="preset-btn sens-btn" data-sens="1.4">1.4x</button>
+          <button class="preset-btn sens-btn" data-sens="1.8">1.8x</button>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="igi-btn primary" id="btn-close-settings">APPLY &amp; RESUME</button>
+        <button class="igi-btn danger" id="btn-restart-mission" style="display:none;">RESTART</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- IGI SATELLITE MAP COMPUTER + SAVE -->
+  <div id="map-modal" class="overlay-screen" style="display:none;">
+    <div class="panel">
+      <div class="title-igi">IGI SATELLITE MAP COMPUTER</div>
+      <canvas id="map-canvas" width="360" height="215"></canvas>
+      <div class="sub-info" id="map-obj-text" style="margin-bottom:6px;"></div>
+      <div id="save-feedback" class="save-note"></div>
+      <div class="btn-row">
+        <button class="igi-btn primary" id="btn-save-mission">UPLOAD SAVE (3 LEFT)</button>
+        <button class="igi-btn" id="btn-close-map">CLOSE MAP</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MISSION END -->
+  <div id="end-modal" class="overlay-screen" style="display:none;">
+    <div class="panel" style="text-align:center;">
+      <div class="title-igi" id="end-title">MISSION FAILED</div>
+      <div class="sub-info" id="end-desc"></div>
+      <div class="btn-row">
+        <button class="igi-btn primary" id="btn-load-last-save" style="display:none;">LOAD CHECKPOINT</button>
+        <button class="igi-btn" id="btn-end-restart">RETRY MISSION</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LIVE TACTICAL HUD -->
+  <div id="hud">
+    <div class="hud-tl">
+      <div style="color:#ffd166;font-weight:bold;">M01: INFILTRATION</div>
+      <div><b>OBJ:</b> <span id="hud-obj">...</span></div>
+      <div><b>FPS:</b> <span id="fps-val">--</span> | <b>HOSTILES:</b> <span id="enemy-count">0</span> | <span id="stance-val">STAND</span></div>
+      <div class="hp-bar-wrap"><div id="hp-bar"></div></div>
+    </div>
+
+    <div id="alarm-tag">BASE ALARM ACTIVE!</div>
+
+    <div class="hud-tr">
+      <button class="top-btn" id="btn-map">MAP/SAVE</button>
+      <button class="top-btn" id="btn-menu">GFX/MENU</button>
+      <button class="top-btn" id="btn-full">FULL</button>
+    </div>
+
+    <div id="status-banner"></div>
+
+    <div id="crosshair">
+      <div class="ch-l ch-t"></div><div class="ch-l ch-b"></div>
+      <div class="ch-l ch-le"></div><div class="ch-l ch-ri"></div>
+    </div>
+    <div id="hitmarker">✕</div>
+
+    <button id="btn-interact">[E] INTERACT</button>
+
+    <div class="hud-bc">
+      <b>MP5SD3 (SILENCED)</b> &nbsp;|&nbsp; <span id="ammo-val">30 / 120</span>
+    </div>
+
+    <div id="joy-zone"><div id="joy-knob"></div></div>
+
+    <div id="action-pad">
+      <button class="c-btn" id="btn-therm">THERM</button>
+      <button class="c-btn" id="btn-scope">SCOPE</button>
+      <button class="c-btn" id="btn-crouch">CROUCH</button>
+      <button class="c-btn" id="btn-reload">RELOAD</button>
+      <button class="c-btn fire" id="btn-fire">FIRE</button>
+    </div>
+  </div>
+
+  <script type="module" src="./js/game.js"></script>
+</body>
+</html>
