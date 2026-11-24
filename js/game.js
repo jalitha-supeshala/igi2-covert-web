@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 // ===================== 1. SETTINGS & SAVE STORAGE =====================
-const CFG_KEY = 'igi2_real_cfg_v1';
-const SAVE_KEY = 'igi2_real_save_v1';
+const CFG_KEY = 'igi2_real_cfg_v2';
+const SAVE_KEY = 'igi2_real_save_v2';
 const getStore = k => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } };
 const setStore = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
 
@@ -53,66 +55,89 @@ function playSfx(type) {
   }
 }
 
-// ===================== 3. SCENE, LIGHTING & REAL SKY =====================
+// ===================== 3. SCENE, REAL PBR LIGHTING & IGI 2 SKY =====================
+const DAY_FOG = 0x73899b;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x16222e);
-scene.fog = new THREE.FogExp2(0x16222e, 0.009);
+scene.background = new THREE.Color(DAY_FOG);
+scene.fog = new THREE.FogExp2(DAY_FOG, 0.0075);
 
-const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.1, 220);
+const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.05, 230);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
 
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = settings.shadowSize > 0;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.08;
+renderer.toneMappingExposure = 1.28;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
-// Realistic Cold Twilight Sky Dome
-const skyGeo = new THREE.SphereGeometry(200, 16, 12);
+// Crucial Fix: PBR Environment Map so Metallic GLBs (Truck, Weapon, Soldier) NEVER look black!
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+pmrem.dispose();
+
+// Bright Cold Carpathian Overcast Sky Dome (Matches IGI 2 Mission 01)
+const skyGeo = new THREE.SphereGeometry(205, 16, 12);
 const skyCanvas = document.createElement('canvas'); skyCanvas.width = 16; skyCanvas.height = 128;
 const sctx = skyCanvas.getContext('2d');
 const sg = sctx.createLinearGradient(0, 0, 0, 128);
-sg.addColorStop(0, '#070e17'); sg.addColorStop(0.48, '#172838'); sg.addColorStop(0.62, '#2d4152'); sg.addColorStop(1, '#1a242e');
+sg.addColorStop(0, '#2a3e52'); sg.addColorStop(0.42, '#5a7489'); sg.addColorStop(0.58, '#8fa6b8'); sg.addColorStop(1, '#5d6e7a');
 sctx.fillStyle = sg; sctx.fillRect(0, 0, 16, 128);
-const skyMesh = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(skyCanvas), side: THREE.BackSide, fog: false }));
-scene.add(skyMesh);
+scene.add(new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(skyCanvas), side: THREE.BackSide, fog: false })));
 
-const hemiLight = new THREE.HemisphereLight(0x9ec0de, 0x263138, 0.85);
+// Bright Multi-Directional Daylight
+const hemiLight = new THREE.HemisphereLight(0xe4f1ff, 0x52616b, 1.45);
 scene.add(hemiLight);
 
-const sunLight = new THREE.DirectionalLight(0xd9ecff, 1.1);
-sunLight.position.set(45, 65, 35);
+const sunLight = new THREE.DirectionalLight(0xfff5e6, 2.0);
+sunLight.position.set(50, 75, 45);
 sunLight.castShadow = settings.shadowSize > 0;
 sunLight.shadow.mapSize.set(1024, 1024);
-sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 180;
+sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 185;
 sunLight.shadow.camera.left = -65; sunLight.shadow.camera.right = 65;
 sunLight.shadow.camera.top = 65; sunLight.shadow.camera.bottom = -65;
 sunLight.shadow.bias = -0.0012;
 scene.add(sunLight);
 
-// ===================== 4. REAL ASSET LOADER (GLB + PHOTO TEXTURES) =====================
+// Soft fill light from opposite side so shadows are never pitch black
+const fillLight = new THREE.DirectionalLight(0xaad0f5, 0.65);
+fillLight.position.set(-45, 35, -40);
+scene.add(fillLight);
+
+// Subtle camera light for crisp FPS weapon & hands detail
+const fpLight = new THREE.PointLight(0xdceeff, 0.55, 3);
+fpLight.position.set(0.15, 0.25, 0.1);
+camera.add(fpLight);
+
+// ===================== 4. REAL ASSET LOADER (GLB + DRACO + PHOTO TEXTURES) =====================
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
 const texLoader = new THREE.TextureLoader();
 
 const LOADED_ASSETS = { soldier: null, weapon: null, truck: null, watchtower: null };
 const ASSET_STATUS = { models: 0, textures: 0 };
+const ASSET_ERRORS = [];
 
 function setLoadProgress(pct, msg) {
   document.getElementById('load-bar').style.width = `${pct}%`;
   document.getElementById('load-log').textContent = msg;
 }
 
-function loadOptionalGLB(path) {
+function loadOptionalGLB(path, label) {
   return new Promise(resolve => {
     gltfLoader.load(
       path,
       gltf => { ASSET_STATUS.models++; resolve(gltf); },
       undefined,
-      () => resolve(null) // Gracefully fallback if user hasn't uploaded this .glb yet
+      err => {
+        ASSET_ERRORS.push(`${label} failed (${err?.message ? err.message.slice(0, 48) : 'error'})`);
+        resolve(null);
+      }
     );
   });
 }
@@ -150,7 +175,6 @@ function smoothstep(a, b, x) {
   return t * t * (3 - 2 * t);
 }
 
-// Flat inside the military compound (-42..42), rising into real snow mountains outside!
 function getTerrainHeight(x, z) {
   const edgeDist = Math.max(Math.abs(x) - 42, Math.abs(z) - 44);
   if (edgeDist <= 0) return 0;
@@ -159,14 +183,11 @@ function getTerrainHeight(x, z) {
     Math.sin(x * 0.055) * Math.cos(z * 0.055) * 9.5 +
     Math.sin(x * 0.13 + z * 0.09) * 3.2 +
     Math.abs(Math.cos(x * 0.03 - z * 0.04)) * 12.0;
-  // Keep a walkable snowy infiltration hill on South spawn side (z > 44, |x| < 14)
-  if (z > 42 && Math.abs(x) < 16) {
-    return smoothstep(42, 72, z) * 6.5;
-  }
+  if (z > 42 && Math.abs(x) < 16) return smoothstep(42, 72, z) * 6.5;
   return Math.max(0, blend * (hills + edgeDist * 0.32));
 }
 
-// ===================== 6. WORLD, BUILDINGS, ENEMIES & WEAPON =====================
+// ===================== 6. WORLD, BUILDINGS, ENEMIES & FPS ARMS =====================
 const colliders = [];
 const worldMeshes = [];
 const mapRects = [];
@@ -178,7 +199,7 @@ let empChipMesh = null, termScreenMesh = null, extractRingMesh = null, secCam = 
 const gunRoot = new THREE.Group();
 camera.add(gunRoot);
 const muzzleFlash = new THREE.Mesh(
-  new THREE.SphereGeometry(0.05, 6, 6),
+  new THREE.SphereGeometry(0.045, 6, 6),
   new THREE.MeshBasicMaterial({ color: 0xffe484, transparent: true, opacity: 0 })
 );
 
@@ -193,7 +214,7 @@ for (let i = 0; i < SNOW_MAX; i++) {
 }
 snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
 const snowParticles = new THREE.Points(
-  snowGeo, new THREE.PointsMaterial({ color: 0xdce8f2, size: 0.17, transparent: true, opacity: 0.72 })
+  snowGeo, new THREE.PointsMaterial({ color: 0xeaf4fc, size: 0.17, transparent: true, opacity: 0.72 })
 );
 scene.add(snowParticles);
 
@@ -207,12 +228,26 @@ function addBox(w, h, d, x, y, z, mat, solid = true, mapCol = null) {
   return m;
 }
 
+function addWindow(w, h, x, y, z, rotY = 0) {
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(w + 0.18, h + 0.18, 0.14), mats.darkSteel);
+  const glass = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mats.windowGlow);
+  glass.position.z = 0.08;
+  const g = new THREE.Group();
+  g.add(frame, glass);
+  g.position.set(x, y, z);
+  g.rotation.y = rotY;
+  scene.add(g);
+}
+
 function normalizeModel(obj, targetHeight) {
   const box = new THREE.Box3().setFromObject(obj);
   const size = new THREE.Vector3(); box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
   if (size.y > 0.001) {
     const scale = targetHeight / size.y;
     obj.scale.multiplyScalar(scale);
+  } else if (maxDim > 0.001) {
+    obj.scale.multiplyScalar(targetHeight / maxDim);
   }
   const box2 = new THREE.Box3().setFromObject(obj);
   const center = new THREE.Vector3(); box2.getCenter(center);
@@ -220,21 +255,72 @@ function normalizeModel(obj, targetHeight) {
   obj.position.z -= center.z;
   obj.position.y -= box2.min.y;
   obj.traverse(c => {
-    if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
+    if (c.isMesh) {
+      c.castShadow = true; c.receiveShadow = true;
+      if (c.material) {
+        c.material.envMapIntensity = 1.25;
+        if (c.material.metalness > 0.85) c.material.metalness = 0.72;
+        if (c.material.roughness < 0.2) c.material.roughness = 0.35;
+      }
+    }
   });
+}
+
+function buildFPSArms() {
+  const arms = new THREE.Group();
+  const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x354238, roughness: 0.85, metalness: 0.05 });
+  const cuffMat = new THREE.MeshStandardMaterial({ color: 0x1e2420, roughness: 0.9 });
+  const gloveMat = new THREE.MeshStandardMaterial({ color: 0x191c1e, roughness: 0.75, metalness: 0.1 });
+
+  // Right Forearm & Tactical Gloved Hand (Gripping handle)
+  const rArm = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.056, 0.44, 10), sleeveMat);
+  rArm.rotation.set(Math.PI / 2 - 0.18, 0, -0.22);
+  rArm.position.set(0.08, -0.14, 0.22);
+  const rCuff = new THREE.Mesh(new THREE.CylinderGeometry(0.043, 0.045, 0.06, 10), cuffMat);
+  rCuff.rotation.copy(rArm.rotation); rCuff.position.set(0.035, -0.09, 0.03);
+  const rHand = new THREE.Mesh(new THREE.BoxGeometry(0.068, 0.075, 0.095), gloveMat);
+  rHand.position.set(0.008, -0.055, -0.02);
+
+  // Left Supporting Forearm & Gloved Hand
+  const lArm = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.054, 0.48, 10), sleeveMat);
+  lArm.rotation.set(Math.PI / 2 - 0.12, 0, 0.56);
+  lArm.position.set(-0.18, -0.15, 0.14);
+  const lHand = new THREE.Mesh(new THREE.BoxGeometry(0.068, 0.064, 0.09), gloveMat);
+  lHand.position.set(-0.02, -0.06, -0.09);
+
+  arms.add(rArm, rCuff, rHand, lArm, lHand);
+  return arms;
 }
 
 function setupWeapon() {
   if (LOADED_ASSETS.weapon) {
     const wp = LOADED_ASSETS.weapon.scene.clone();
-    normalizeModel(wp, 0.24);
-    wp.rotation.y = Math.PI; // Standard GLB facing forward
+    // Normalize by longest dimension so pistols/rifles scale cleanly
+    const box = new THREE.Box3().setFromObject(wp);
+    const sz = new THREE.Vector3(); box.getSize(sz);
+    const maxD = Math.max(sz.x, sz.y, sz.z);
+    if (maxD > 0.001) wp.scale.multiplyScalar(0.36 / maxD);
+    const box2 = new THREE.Box3().setFromObject(wp);
+    const ctr = new THREE.Vector3(); box2.getCenter(ctr);
+    wp.position.sub(ctr);
+    wp.traverse(c => {
+      if (c.isMesh) {
+        c.castShadow = false;
+        if (c.material) {
+          c.material.envMapIntensity = 1.6;
+          if (c.material.metalness > 0.8) c.material.metalness = 0.65;
+          if (c.material.roughness < 0.25) c.material.roughness = 0.35;
+        }
+      }
+    });
+    // Face barrel straight ahead
+    wp.rotation.y = Math.PI;
+    wp.position.set(0, 0.02, -0.08);
     gunRoot.add(wp);
-    muzzleFlash.position.set(0, 0.05, -0.48);
+    muzzleFlash.position.set(0, 0.04, -0.34);
   } else {
-    // Detailed MP5SD3 PBR Fallback
-    const gm = new THREE.MeshStandardMaterial({ color: 0x1e2429, roughness: 0.38, metalness: 0.78 });
-    const gp = new THREE.MeshStandardMaterial({ color: 0x111518, roughness: 0.85, metalness: 0.15 });
+    const gm = new THREE.MeshStandardMaterial({ color: 0x353e45, roughness: 0.4, metalness: 0.7 });
+    const gp = new THREE.MeshStandardMaterial({ color: 0x1b2024, roughness: 0.85, metalness: 0.15 });
     const rcv = new THREE.Mesh(new THREE.BoxGeometry(0.066, 0.084, 0.36), gm);
     const shrd = new THREE.Mesh(new THREE.CylinderGeometry(0.031, 0.033, 0.22, 10), gp);
     shrd.rotation.x = Math.PI / 2; shrd.position.set(0, 0.01, -0.24);
@@ -245,12 +331,12 @@ function setupWeapon() {
     gunRoot.add(rcv, shrd, brl, mag);
     muzzleFlash.position.set(0, 0.01, -0.52);
   }
+  gunRoot.add(buildFPSArms());
   gunRoot.add(muzzleFlash);
-  gunRoot.position.set(0.22, -0.22, -0.42);
+  gunRoot.position.set(0.19, -0.19, -0.36);
 }
 
 function buildTerrainAndBase() {
-  // 1. 3D Heightmap Mountain Terrain (Vertex colored Snow + Rocky Slopes)
   const segs = 96;
   const tGeo = new THREE.PlaneGeometry(240, 240, segs, segs);
   tGeo.rotateX(-Math.PI / 2);
@@ -260,32 +346,30 @@ function buildTerrainAndBase() {
     const x = pos.getX(i), z = pos.getZ(i);
     const y = getTerrainHeight(x, z);
     pos.setY(i, y);
-    // Darker slate rock on steeper/higher mountain ridges, snow elsewhere
     const rockMix = Math.min(1, Math.max(0, (y - 7) / 22));
-    const r = 0.88 - rockMix * 0.48;
-    const g = 0.91 - rockMix * 0.47;
-    const b = 0.95 - rockMix * 0.44;
-    colors.push(r, g, b);
+    colors.push(0.95 - rockMix * 0.42, 0.97 - rockMix * 0.41, 1.0 - rockMix * 0.38);
   }
   tGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   tGeo.computeVertexNormals();
   const terrain = new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({
-    map: mats.snowTex, vertexColors: true, roughness: 0.92, metalness: 0.04
+    map: mats.snowTex, vertexColors: true, roughness: 0.9, metalness: 0.02
   }));
   terrain.receiveShadow = true;
   scene.add(terrain);
 
-  // Asphalt compound road
-  const road = new THREE.Mesh(new THREE.PlaneGeometry(9.5, 86), new THREE.MeshStandardMaterial({ color: 0x2a3136, roughness: 0.92 }));
+  // Asphalt compound road with weathered concrete edge
+  const road = new THREE.Mesh(new THREE.PlaneGeometry(9.5, 86), new THREE.MeshStandardMaterial({ color: 0x3a434a, roughness: 0.92 }));
   road.rotation.x = -Math.PI / 2; road.position.set(0, 0.04, 0); road.receiveShadow = true;
   scene.add(road);
 
-  // Perimeter Concrete Wall + Gate Gap on South
-  addBox(36, 2.5, 1, -24, 1.25, 42, mats.concrete, true, '#3a5444');
-  addBox(36, 2.5, 1, 24, 1.25, 42, mats.concrete, true, '#3a5444');
-  addBox(84, 2.5, 1, 0, 1.25, -44, mats.concrete, true, '#3a5444');
-  addBox(1, 2.5, 86, -42, 1.25, -1, mats.concrete, true, '#3a5444');
-  addBox(1, 2.5, 86, 42, 1.25, -1, mats.concrete, true, '#3a5444');
+  // Perimeter Concrete Wall + Gate Pillars
+  addBox(36, 2.7, 1, -24, 1.35, 42, mats.concrete, true, '#3a5444');
+  addBox(36, 2.7, 1, 24, 1.35, 42, mats.concrete, true, '#3a5444');
+  addBox(84, 2.7, 1, 0, 1.35, -44, mats.concrete, true, '#3a5444');
+  addBox(1, 2.7, 86, -42, 1.35, -1, mats.concrete, true, '#3a5444');
+  addBox(1, 2.7, 86, 42, 1.35, -1, mats.concrete, true, '#3a5444');
+  addBox(1.4, 3.6, 1.4, -6, 1.8, 42, mats.darkSteel, true);
+  addBox(1.4, 3.6, 1.4, 6, 1.8, 42, mats.darkSteel, true);
 
   // Walkable Main Warehouse (West — holds EMP Chips)
   addBox(1.1, 7.2, 22, -30, 3.6, -4, mats.metal, true, '#2d6a47');
@@ -294,8 +378,13 @@ function buildTerrainAndBase() {
   addBox(1.1, 7.2, 8.6, -14, 3.6, -10.7, mats.metal, true, '#2d6a47');
   addBox(1.1, 7.2, 8.6, -14, 3.6, 2.7, mats.metal, true, '#2d6a47');
   addBox(1.1, 2.5, 4.8, -14, 5.95, -4, mats.metal, false);
-  addBox(17.2, 0.7, 23.2, -22, 7.5, -4, mats.roof, false);
+  addBox(17.4, 0.7, 23.4, -22, 7.5, -4, mats.roof, false);
   addBox(1.8, 1.0, 2.6, -26.8, 0.5, -4, mats.crate, true);
+  // Warehouse windows
+  addWindow(2.8, 1.3, -18, 4.8, 7.58, 0);
+  addWindow(2.8, 1.3, -25, 4.8, 7.58, 0);
+  addWindow(2.8, 1.3, -13.42, 4.8, -10.5, Math.PI / 2);
+  addWindow(2.8, 1.3, -13.42, 4.8, 2.5, Math.PI / 2);
 
   // Walkable Control Bunker (East — holds Elevator Hack Terminal)
   addBox(1.1, 5.2, 14, 29, 2.6, -20, mats.concrete, true, '#357853');
@@ -304,15 +393,17 @@ function buildTerrainAndBase() {
   addBox(1.1, 5.2, 4.8, 15, 2.6, -24.6, mats.concrete, true, '#357853');
   addBox(1.1, 5.2, 4.8, 15, 2.6, -15.4, mats.concrete, true, '#357853');
   addBox(1.1, 1.8, 4.4, 15, 4.3, -20, mats.concrete, false);
-  addBox(15.2, 0.7, 15.2, 22, 5.5, -20, mats.roof, false);
+  addBox(15.4, 0.7, 15.4, 22, 5.5, -20, mats.roof, false);
+  addWindow(2.6, 1.1, 19, 3.2, -12.42, 0);
+  addWindow(2.6, 1.1, 25, 3.2, -12.42, 0);
 
   // Mine Shaft Elevator House (North Extraction)
   addBox(8.6, 5.4, 1, 0, 2.7, -41, mats.concrete, true, '#4f7d5d');
   addBox(1, 5.4, 7.5, -4.3, 2.7, -37.2, mats.concrete, true, '#4f7d5d');
   addBox(1, 5.4, 7.5, 4.3, 2.7, -37.2, mats.concrete, true, '#4f7d5d');
-  addBox(9.2, 0.7, 8.2, 0, 5.7, -37.2, mats.roof, false);
+  addBox(9.4, 0.7, 8.4, 0, 5.7, -37.2, mats.roof, false);
 
-  // Watchtower (Uses Real watchtower.glb if uploaded!)
+  // Watchtower
   if (LOADED_ASSETS.watchtower) {
     const wt = LOADED_ASSETS.watchtower.scene.clone();
     normalizeModel(wt, 12.5);
@@ -328,7 +419,7 @@ function buildTerrainAndBase() {
     addBox(5.6, 0.4, 5.6, -34, 12.4, -34, mats.roof, false);
   }
 
-  // Military Truck (Uses Real truck.glb if uploaded!)
+  // Military Truck
   if (LOADED_ASSETS.truck) {
     const tr = LOADED_ASSETS.truck.scene.clone();
     normalizeModel(tr, 3.3);
@@ -345,12 +436,12 @@ function buildTerrainAndBase() {
   // Cover Crates
   [[-8, 16], [8, -4], [-8, -22], [8, -30]].forEach(([x, z]) => addBox(2.3, 2.3, 2.3, x, 1.15, z, mats.crate, true, '#576b3d'));
 
-  // Instanced Snow Pine Trees around the Hills
+  // Snow Pine Trees
   const treeSpots = [
     [-22, 52], [-14, 58], [16, 56], [26, 48], [-48, 22], [-48, -14], [48, 18], [48, -18], [-24, -50], [22, -50]
   ];
-  const trunkI = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.24, 0.36, 2.4, 6), new THREE.MeshLambertMaterial({ color: 0x3b2c20 }), treeSpots.length);
-  const leafI = new THREE.InstancedMesh(new THREE.ConeGeometry(2.5, 7.2, 6), new THREE.MeshLambertMaterial({ color: 0x1d3428 }), treeSpots.length);
+  const trunkI = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.24, 0.36, 2.4, 6), new THREE.MeshStandardMaterial({ color: 0x4c3a2b, roughness: 0.9 }), treeSpots.length);
+  const leafI = new THREE.InstancedMesh(new THREE.ConeGeometry(2.5, 7.2, 6), new THREE.MeshStandardMaterial({ color: 0x2a4a39, roughness: 0.9 }), treeSpots.length);
   const dObj = new THREE.Object3D();
   treeSpots.forEach(([x, z], i) => {
     const ty = getTerrainHeight(x, z);
@@ -376,7 +467,7 @@ function buildTerrainAndBase() {
   const ledMat = new THREE.MeshBasicMaterial({ color: 0x3cff6a });
   const cLed = new THREE.Mesh(new THREE.SphereGeometry(0.09, 6, 6), ledMat); cLed.position.set(0, 0, 0.38);
   const coneGeo = new THREE.ConeGeometry(4.0, 16, 10, 1, true); coneGeo.translate(0, -8, 0); coneGeo.rotateX(-Math.PI / 2);
-  const coneMesh = new THREE.Mesh(coneGeo, new THREE.MeshBasicMaterial({ color: 0x3cff6a, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+  const coneMesh = new THREE.Mesh(coneGeo, new THREE.MeshBasicMaterial({ color: 0x3cff6a, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false }));
   coneMesh.rotation.x = 0.25;
   cGrp.add(cBody, cLed, coneMesh);
   cBody.userData = { isCamera: true };
@@ -413,9 +504,10 @@ function spawnEnemies(saved = null) {
     let mixer = null, actions = {}, visualMeshes = [], legL = null, legR = null;
 
     if (LOADED_ASSETS.soldier) {
-      // REAL GLB ANIMATED SOLDIER (Cloned cleanly with SkeletonUtils)
-      const model = cloneSkinned(LOADED_ASSETS.soldier.scene);
-      normalizeModel(model, 1.82);
+      let model;
+      try { model = cloneSkinned(LOADED_ASSETS.soldier.scene); }
+      catch { model = LOADED_ASSETS.soldier.scene.clone(); }
+      normalizeModel(model, 1.85);
       g.add(model);
       model.traverse(c => {
         if (c.isMesh) { c.userData.origMat = c.material; visualMeshes.push(c); }
@@ -429,21 +521,22 @@ function spawnEnemies(saved = null) {
         actions.idle.play();
       }
     } else {
-      // Tactical Fallback Soldier
-      const bMat = new THREE.MeshStandardMaterial({ color: 0x2d3a33, roughness: 0.85 });
-      const aMat = new THREE.MeshStandardMaterial({ color: 0x1b211f, roughness: 0.7 });
-      const sMat = new THREE.MeshStandardMaterial({ color: 0xc29b7c, roughness: 0.8 });
-      legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.85, 0.24), bMat); legL.position.set(-0.14, 0.42, 0);
+      // Tactical Russian Snow Guard Fallback (Helmet, Goggles, Camo Uniform, AK-74)
+      const uMat = new THREE.MeshStandardMaterial({ color: 0x4b5c50, roughness: 0.85 });
+      const vMat = new THREE.MeshStandardMaterial({ color: 0x2b332f, roughness: 0.75 });
+      const sMat = new THREE.MeshStandardMaterial({ color: 0xd4a987, roughness: 0.78 });
+      const hMat = new THREE.MeshStandardMaterial({ color: 0x364239, roughness: 0.7 });
+      legL = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.09, 0.86, 8), uMat); legL.position.set(-0.14, 0.43, 0);
       legR = legL.clone(); legR.position.x = 0.14;
-      const torso = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.7, 0.3), bMat); torso.position.y = 1.18;
-      const vest = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.48, 0.34), aMat); vest.position.y = 1.22;
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.28, 0.28), sMat); head.position.y = 1.72;
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.21, 0.72, 10), uMat); torso.position.y = 1.18;
+      const vest = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.48, 0.34), vMat); vest.position.y = 1.22;
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 10), sMat); head.position.y = 1.72;
+      const helm = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.58), hMat); helm.position.y = 1.75;
       const rifle = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 0.88), mats.darkSteel); rifle.position.set(0.28, 1.18, 0.34);
-      g.add(legL, legR, torso, vest, head, rifle);
-      [legL, legR, torso, vest, head].forEach(m => { m.castShadow = true; m.userData.origMat = m.material; visualMeshes.push(m); });
+      g.add(legL, legR, torso, vest, head, helm, rifle);
+      [legL, legR, torso, vest, head, helm].forEach(m => { m.castShadow = true; m.userData.origMat = m.material; visualMeshes.push(m); });
     }
 
-    // Ultra-Fast Invisible Hitboxes (Crucial Mobile FPS Optimization — avoids raycasting high-poly GLB meshes!)
     const bodyHit = new THREE.Mesh(new THREE.BoxGeometry(0.65, 1.4, 0.45), invisibleHitMat); bodyHit.position.y = 0.72;
     const headHit = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.36, 0.36), invisibleHitMat); headHit.position.y = 1.66;
     const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.11, 5, 5), new THREE.MeshBasicMaterial({ color: 0xffb74d, transparent: true, opacity: 0 }));
@@ -480,7 +573,7 @@ function setThermal(on) {
   player.thermal = on;
   document.getElementById('thermal-overlay').style.display = on ? 'block' : 'none';
   document.getElementById('btn-therm').classList.toggle('active', on);
-  scene.fog.color.setHex(on ? 0x050b1f : 0x16222e);
+  scene.fog.color.setHex(on ? 0x050b1f : DAY_FOG);
   enemies.forEach(e => e.visualMeshes.forEach(m => { m.material = (on && e.alive) ? thermalBodyMat : m.userData.origMat; }));
 }
 
@@ -590,8 +683,8 @@ function applySettings() {
     if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
   }
   snowParticles.visible = settings.snow;
-  camera.far = settings.drawDist + 60; camera.updateProjectionMatrix();
-  scene.fog.density = settings.drawDist < 80 ? 0.016 : (settings.drawDist < 140 ? 0.009 : 0.0055);
+  camera.far = settings.drawDist + 65; camera.updateProjectionMatrix();
+  scene.fog.density = settings.drawDist < 80 ? 0.013 : (settings.drawDist < 140 ? 0.0075 : 0.0045);
 
   document.querySelectorAll('[data-preset]').forEach(b => b.classList.toggle('selected', b.dataset.preset === settings.preset));
   document.querySelectorAll('.res-btn').forEach(b => b.classList.toggle('selected', parseFloat(b.dataset.res) === settings.resScale));
@@ -671,7 +764,6 @@ function drawMap() {
   document.getElementById('map-obj-text').innerHTML = `<b>TARGET (YELLOW):</b> ${getObjText()}`;
 }
 
-// Input Listeners
 const keys = {}; let joyX = 0, joyY = 0;
 window.addEventListener('keydown', e => {
   keys[e.code] = true; if (!gameActive) return;
@@ -695,7 +787,6 @@ window.addEventListener('mousedown', e => { if (document.pointerLockElement !== 
 window.addEventListener('mouseup', e => { if (e.button === 0) isFiring = false; });
 window.addEventListener('contextmenu', e => e.preventDefault());
 
-// Touch Joystick & Aim
 const joyZone = document.getElementById('joy-zone'), joyKnob = document.getElementById('joy-knob');
 let joyId = null, lookId = null, lx = 0, ly = 0;
 const moveJoy = t => {
@@ -723,7 +814,6 @@ renderer.domElement.addEventListener('touchmove', e => {
 const endLook = e => { for (const t of e.changedTouches) if (t.identifier === lookId) lookId = null; };
 renderer.domElement.addEventListener('touchend', endLook); renderer.domElement.addEventListener('touchcancel', endLook);
 
-// Buttons
 const fireB = document.getElementById('btn-fire');
 fireB.addEventListener('touchstart', e => { e.preventDefault(); e.stopPropagation(); isFiring = true; if (fireTimer <= 0) fireOnce(); }, { passive: false });
 fireB.addEventListener('touchend', () => { isFiring = false; }); fireB.addEventListener('touchcancel', () => { isFiring = false; });
@@ -840,10 +930,9 @@ function animate(now) {
 
     player.recoil *= Math.max(0, 1 - dt * 15);
     const bob = mag > 0.1 ? Math.sin(now * 0.011) * 0.008 : 0;
-    gunRoot.position.set(0.22, -0.22 + bob + player.recoil * 0.2, -0.42 + player.recoil);
-    gunRoot.rotation.x = player.recoil * 2.0;
+    gunRoot.position.set(0.19, -0.19 + bob + player.recoil * 0.18, -0.36 + player.recoil);
+    gunRoot.rotation.x = player.recoil * 1.9;
 
-    // Interact & Extraction
     const iBtn = document.getElementById('btn-interact');
     if (!mState.gotChips && Math.hypot(player.x + 26.8, player.z + 4) < 3.6) { iBtn.textContent = '[E] RETRIEVE EMP CHIPS'; iBtn.style.display = 'block'; }
     else if (mState.gotChips && !mState.hacked && Math.hypot(player.x - 26.5, player.z + 20) < 3.6) { iBtn.textContent = '[E] HACK ELEVATOR LOCK'; iBtn.style.display = 'block'; }
@@ -853,7 +942,6 @@ function animate(now) {
       playSfx('obj'); endGame(true, 'MISSION 01 ACCOMPLISHED!', 'EMP Chips secured. Entering the Mine Shaft...');
     }
 
-    // Security Camera
     if (secCam && secCam.alive) {
       secCam.angle += secCam.dir * dt * 0.55; if (Math.abs(secCam.angle) > 0.85) secCam.dir *= -1;
       secCam.group.rotation.y = Math.PI * 0.32 + secCam.angle;
@@ -876,7 +964,6 @@ function animate(now) {
       if (mState.alarmTimer <= 0) { mState.alarm = false; document.getElementById('alarm-tag').style.display = 'none'; }
     }
 
-    // OPTIMIZED ENEMY LOOP (AI Throttling + Animation Distance Culling)
     const detRange = player.crouching ? 16 : 26;
     const pEye = camera.position;
     for (let i = 0; i < enemies.length; i++) {
@@ -884,12 +971,10 @@ function animate(now) {
       const ex = e.group.position.x, ez = e.group.position.z;
       const distP = Math.hypot(player.x - ex, player.z - ez);
 
-      // LOD Visibility & Animation Culling (Prevents lag when many guards are in base)
       const visible = distP < settings.drawDist + 10;
       e.group.visible = visible;
       if (visible && e.mixer && distP < settings.drawDist * 0.85) e.mixer.update(dt);
 
-      // AI Throttling: Far enemies check LOS only 4 times/sec
       e.aiAccum += dt;
       const interval = distP > 30 ? 0.25 : 0.08;
       if (!e.alert && distP < detRange && e.aiAccum >= interval) {
@@ -940,41 +1025,37 @@ window.addEventListener('resize', () => {
 async function boot() {
   setLoadProgress(15, 'Loading Photo PBR Textures...');
   const snowTex = await loadOptionalTexture('./assets/textures/snow.jpg', 28, 28, (ctx, s) => {
-    ctx.fillStyle = '#bcc8d1'; ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 3600; i++) { ctx.fillStyle = Math.random() < 0.25 ? 'rgba(72,82,88,0.22)' : 'rgba(235,242,248,0.38)'; ctx.fillRect(Math.random()*s, Math.random()*s, 4, 4); }
+    ctx.fillStyle = '#cdd8e0'; ctx.fillRect(0, 0, s, s);
   });
   const concTex = await loadOptionalTexture('./assets/textures/concrete.jpg', 3, 2, (ctx, s) => {
-    ctx.fillStyle = '#5c6468'; ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 2800; i++) { const v = 65 + Math.floor(Math.random()*48); ctx.fillStyle = `rgba(${v},${v+2},${v+4},0.32)`; ctx.fillRect(Math.random()*s, Math.random()*s, 3, 3); }
-    ctx.strokeStyle = 'rgba(20,24,28,0.5)'; ctx.lineWidth = 2; ctx.strokeRect(2, 2, s-4, s/2-2); ctx.strokeRect(2, s/2, s-4, s/2-2);
+    ctx.fillStyle = '#757d82'; ctx.fillRect(0, 0, s, s);
   });
   const metTex = await loadOptionalTexture('./assets/textures/metal.jpg', 4, 2, (ctx, s) => {
-    ctx.fillStyle = '#3a474c'; ctx.fillRect(0, 0, s, s);
-    for (let x = 0; x < s; x += 12) { ctx.fillStyle = 'rgba(0,0,0,0.32)'; ctx.fillRect(x, 0, 4, s); ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x+4, 0, 3, s); }
-    for (let i = 0; i < 42; i++) { ctx.fillStyle = `rgba(120,56,28,${0.12+Math.random()*0.2})`; ctx.fillRect(Math.random()*s, Math.random()*s, 18, 22); }
+    ctx.fillStyle = '#536269'; ctx.fillRect(0, 0, s, s);
   });
   const crateTex = makeProceduralTex((ctx, s) => {
-    ctx.fillStyle = '#4f553b'; ctx.fillRect(0, 0, s, s);
-    ctx.strokeStyle = '#2a2e1f'; ctx.lineWidth = 14; ctx.strokeRect(7, 7, s-14, s-14);
-    ctx.fillStyle = 'rgba(220,205,120,0.6)'; ctx.font = 'bold 26px monospace'; ctx.fillText('RU-EMP', 68, 138);
+    ctx.fillStyle = '#5f6848'; ctx.fillRect(0, 0, s, s);
+    ctx.strokeStyle = '#333826'; ctx.lineWidth = 14; ctx.strokeRect(7, 7, s-14, s-14);
+    ctx.fillStyle = 'rgba(235,220,130,0.85)'; ctx.font = 'bold 26px monospace'; ctx.fillText('RU-EMP', 68, 138);
   }, 1, 1);
 
   mats.snowTex = snowTex;
-  mats.concrete = new THREE.MeshStandardMaterial({ map: concTex, roughness: 0.9, metalness: 0.05 });
-  mats.metal = new THREE.MeshStandardMaterial({ map: metTex, roughness: 0.65, metalness: 0.45 });
-  mats.crate = new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.85 });
-  mats.darkSteel = new THREE.MeshStandardMaterial({ color: 0x262d33, roughness: 0.5, metalness: 0.65 });
-  mats.roof = new THREE.MeshStandardMaterial({ color: 0x1d242a, roughness: 0.85 });
+  mats.concrete = new THREE.MeshStandardMaterial({ map: concTex, roughness: 0.88, metalness: 0.05 });
+  mats.metal = new THREE.MeshStandardMaterial({ map: metTex, roughness: 0.62, metalness: 0.35 });
+  mats.crate = new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.82 });
+  mats.darkSteel = new THREE.MeshStandardMaterial({ color: 0x3b454d, roughness: 0.48, metalness: 0.55 });
+  mats.roof = new THREE.MeshStandardMaterial({ color: 0x303a42, roughness: 0.85 });
+  mats.windowGlow = new THREE.MeshBasicMaterial({ color: 0xffe4a8 });
 
-  setLoadProgress(45, 'Loading 3D Soldier Model (assets/models/soldier.glb)...');
-  LOADED_ASSETS.soldier = await loadOptionalGLB('./assets/models/soldier.glb');
+  setLoadProgress(45, 'Loading 3D Soldier Model (soldier.glb)...');
+  LOADED_ASSETS.soldier = await loadOptionalGLB('./assets/models/soldier.glb', 'soldier.glb');
 
-  setLoadProgress(65, 'Loading 3D Weapon Model (assets/models/wepon.glb)...');
-  LOADED_ASSETS.weapon = await loadOptionalGLB('./assets/models/wepon.glb');
+  setLoadProgress(65, 'Loading 3D Weapon Model (wepon.glb)...');
+  LOADED_ASSETS.weapon = await loadOptionalGLB('./assets/models/wepon.glb', 'wepon.glb');
 
   setLoadProgress(80, 'Loading Military Props (watchtower.glb / truck.glb)...');
-  LOADED_ASSETS.watchtower = await loadOptionalGLB('./assets/models/watchtower.glb');
-  LOADED_ASSETS.truck = await loadOptionalGLB('./assets/models/truck.glb');
+  LOADED_ASSETS.watchtower = await loadOptionalGLB('./assets/models/watchtower.glb', 'watchtower.glb');
+  LOADED_ASSETS.truck = await loadOptionalGLB('./assets/models/truck.glb', 'truck.glb');
 
   setLoadProgress(95, 'Building Carpathian Mountains & Military Base...');
   setupWeapon();
@@ -982,9 +1063,11 @@ async function boot() {
   applySettings();
   updateSaveUI();
 
+  const errHtml = ASSET_ERRORS.length > 0
+    ? `<br><span style="color:#ff8080;">DEBUG: ${ASSET_ERRORS.join(' | ')}</span>`
+    : '';
   document.getElementById('asset-badge').innerHTML =
-    `REAL 3D MODELS LOADED: <b>${ASSET_STATUS.models} / 4</b> &nbsp;|&nbsp; REAL PHOTO TEXTURES: <b>${ASSET_STATUS.textures} / 3</b>` +
-    (ASSET_STATUS.models === 0 ? '<br><span style="color:#ffd166;">Upload .glb models into assets/models/ for Full Real Graphics!</span>' : '');
+    `REAL 3D MODELS LOADED: <b>${ASSET_STATUS.models} / 4</b> &nbsp;|&nbsp; REAL PHOTO TEXTURES: <b>${ASSET_STATUS.textures} / 3</b>${errHtml}`;
 
   setLoadProgress(100, 'Ready.');
   setTimeout(() => {
